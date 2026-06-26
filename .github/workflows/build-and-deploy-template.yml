@@ -186,7 +186,7 @@ jobs:
           if [[ -n $(git status -s) ]]; then
             git add environments/
             git commit -m "Update ${{ inputs.service_name }} image tag to ${{ github.run_number }}"
-            git push origin main
+            git push origin master
             echo "✓ Changes committed and pushed to helm repository"
           else
             echo "ℹ No changes detected, skipping commit"

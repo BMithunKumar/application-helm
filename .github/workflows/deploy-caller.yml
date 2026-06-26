@@ -2,7 +2,16 @@ name: Build & Deploy
 
 on:
   workflow_dispatch:
-    branches: [dev]
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - preprod
+          - prod
 
 jobs:
   call-deploy:

@@ -151,7 +151,7 @@ jobs:
           if [[ -n $(git status -s) ]]; then
             git add "$VALUES_FILE"
             git commit -m "Rollback ${{ inputs.service_name }} (${{ inputs.environment }}) from ${{ steps.argocd_info.outputs.current_tag }} to ${{ steps.argocd_info.outputs.target_tag }}"
-            git push origin main
+            git push origin master
           fi
 
       - name: Wait for App to be Healthy
