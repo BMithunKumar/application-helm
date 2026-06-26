@@ -1,0 +1,32 @@
+name: Manual Safe Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - preprod
+          - prod
+      steps_back:
+        description: 'Number of revisions to roll back'
+        required: true
+        default: '1'
+
+jobs:
+  call-rollback:
+    uses: ./.github/workflows/rollback-argocd-template.yml
+    with:
+      service_name: 'argocd-rollback'
+      environment: ${{ github.event.inputs.environment }}
+      steps_back: ${{ github.event.inputs.steps_back }}
+      argocd_server: 'localhost:8080'
+      runner: 'self-hosted'
+      helm_repo_url: 'https://github.com/BMithunKumar/helm-files.git'
+    secrets:
+      ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+      GH_CI_PAT: ${{ secrets.GH_CI_PAT }}

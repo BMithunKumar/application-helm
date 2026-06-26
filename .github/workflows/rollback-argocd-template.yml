@@ -1,0 +1,176 @@
+name: Reusable ArgoCD Hybrid Rollback
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'Service name (must match ArgoCD app and helm yaml filename)'
+        required: true
+        type: string
+      environment:
+        description: 'Environment to rollback (dev, preprod, prod)'
+        required: true
+        type: string
+      steps_back:
+        description: 'How many deployments back to rollback (default 1 = previous)'
+        required: false
+        type: string
+        default: '1'
+      argocd_server:
+        description: 'ArgoCD server hostname'
+        required: false
+        type: string
+        default: 'argocd.example.com'
+      helm_repo_url:
+        description: 'Helm repository URL'
+        required: false
+        type: string
+        default: 'https://github.com/BMithunKumar/helm-files.git'
+      runner:
+        description: 'Runner to use'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      dockerhub_username:
+        description: 'Docker Hub username'
+        required: false
+        type: string
+        default: 'mithunkumarb2004'
+    secrets:
+      ARGOCD_TOKEN:
+        required: true
+      GH_CI_PAT:
+        required: true
+
+jobs:
+  rollback:
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Install ArgoCD CLI and yq
+        run: |
+          curl -sSL -o /usr/local/bin/argocd \
+            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x /usr/local/bin/argocd
+
+          curl -sSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+
+      - name: Login to ArgoCD
+        run: |
+          argocd login ${{ inputs.argocd_server }} \
+            --auth-token ${{ secrets.ARGOCD_TOKEN }} \
+            --grpc-web \
+            --insecure
+
+      - name: Get Target Tag from ArgoCD History
+        id: argocd_info
+        run: |
+          APP_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
+          STEPS_BACK="${{ inputs.steps_back }}"
+
+          if ! [[ "$STEPS_BACK" =~ ^[0-9]+$ ]] || [ "$STEPS_BACK" -lt 1 ]; then
+            echo "ERROR: steps_back must be a positive number"
+            exit 1
+          fi
+
+          argocd app history "$APP_NAME" --output json > history.json
+
+          HISTORY_LENGTH=$(jq length history.json)
+          if [ "$HISTORY_LENGTH" -le "$STEPS_BACK" ]; then
+            echo "ERROR: Not enough history. Found $HISTORY_LENGTH entries, need at least $((STEPS_BACK + 1))"
+            exit 1
+          fi
+
+          CURRENT_TAG=$(jq -r \
+            '.[0].source.helm.parameters[]? | select(.name=="image.tag") | .value' \
+            history.json)
+
+          TARGET_TAG=$(jq -r \
+            ".[$STEPS_BACK].source.helm.parameters[]? | select(.name==\"image.tag\") | .value" \
+            history.json)
+
+          TARGET_REVISION=$(jq -r ".[$STEPS_BACK].revision" history.json)
+
+          if [ -z "$TARGET_TAG" ] || [ "$TARGET_TAG" == "null" ]; then
+            echo "ERROR: Could not find image.tag in ArgoCD history at index $STEPS_BACK"
+            exit 1
+          fi
+
+          echo "Current tag : $CURRENT_TAG"
+          echo "Target tag  : $TARGET_TAG"
+          echo "Revision    : $TARGET_REVISION"
+
+          echo "app_name=$APP_NAME"               >> "$GITHUB_OUTPUT"
+          echo "current_tag=$CURRENT_TAG"         >> "$GITHUB_OUTPUT"
+          echo "target_tag=$TARGET_TAG"           >> "$GITHUB_OUTPUT"
+          echo "target_revision=$TARGET_REVISION" >> "$GITHUB_OUTPUT"
+
+      - name: Disable Auto-Sync
+        run: |
+          argocd app set ${{ steps.argocd_info.outputs.app_name }} \
+            --sync-policy none
+
+      - name: Rollback Cluster via ArgoCD
+        run: |
+          argocd app rollback \
+            ${{ steps.argocd_info.outputs.app_name }} \
+            ${{ steps.argocd_info.outputs.target_revision }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Clone Helm Repository
+        run: |
+          REPO_URL="${{ inputs.helm_repo_url }}"
+          REPO_PATH="${REPO_URL#https://}"
+          git clone https://x-access-token:${{ secrets.GH_CI_PAT }}@${REPO_PATH} helm-repo
+
+      - name: Update Helm Repo to Match Rollback
+        run: |
+          cd helm-repo
+          VALUES_FILE="environments/${{ inputs.environment }}/${{ inputs.service_name }}.yaml"
+
+          if [ ! -f "$VALUES_FILE" ]; then
+            echo "ERROR: Values file not found: $VALUES_FILE"
+            exit 1
+          fi
+
+          yq eval ".image.tag = \"${{ steps.argocd_info.outputs.target_tag }}\"" -i "$VALUES_FILE"
+
+      - name: Commit and Push Helm Repo Update
+        run: |
+          cd helm-repo
+          VALUES_FILE="environments/${{ inputs.environment }}/${{ inputs.service_name }}.yaml"
+
+          if [[ -n $(git status -s) ]]; then
+            git add "$VALUES_FILE"
+            git commit -m "Rollback ${{ inputs.service_name }} (${{ inputs.environment }}) from ${{ steps.argocd_info.outputs.current_tag }} to ${{ steps.argocd_info.outputs.target_tag }}"
+            git push origin main
+          fi
+
+      - name: Wait for App to be Healthy
+        run: |
+          argocd app wait \
+            ${{ steps.argocd_info.outputs.app_name }} \
+            --health \
+            --timeout 300
+
+      - name: Re-enable Auto-Sync
+        if: always()
+        run: |
+          argocd app set ${{ steps.argocd_info.outputs.app_name }} \
+            --sync-policy automated \
+            --auto-prune \
+            --self-heal
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf helm-repo
+          rm -f history.json

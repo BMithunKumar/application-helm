@@ -1,0 +1,198 @@
+name: Reusable Build and Deploy Workflow
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'Name of the service to build and deploy'
+        required: true
+        type: string
+      runner:
+        description: 'Runner to use for the workflow (e.g., ubuntu-latest or self-hosted runner name)'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      dockerhub_username:
+        description: 'Docker Hub username'
+        required: false
+        type: string
+        default: 'mithunkumarb2004'
+      dockerfile_path:
+        description: 'Path to Dockerfile'
+        required: false
+        type: string
+        default: './Dockerfile.cicd'
+      build_context:
+        description: 'Docker build context path'
+        required: false
+        type: string
+        default: '.'
+
+      enable_trivy_scan:
+        description: 'Whether to run Trivy security scan on the Docker image'
+        required: false
+        type: boolean
+        default: true
+      trivy_exit_code:
+        description: 'Exit code for Trivy scanner (0 to not fail on vulnerabilities)'
+        required: false
+        type: string
+        default: '0'
+      trivy_severity:
+        description: 'Severity levels for Trivy scanner'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH'
+      trivy_timeout:
+        description: 'Timeout for Trivy scanner (e.g., 15m0s for 15 minutes)'
+        required: false
+        type: string
+        default: '15m0s'
+      trivy_scanners:
+        description: 'Scanners to enable (vuln, secret, misconfig, license)'
+        required: false
+        type: string
+        default: 'vuln'
+      update_helm_values:
+        description: 'Whether to update helm values in k8s-helm repository'
+        required: false
+        type: boolean
+        default: false
+      helm_repo_url:
+        description: 'Helm repository URL'
+        required: false
+        type: string
+        default: 'https://github.com/BMithunKumar/helm-files.git'
+      helm_environments:
+        description: 'Comma-separated list of environments to update (e.g., dev,poc)'
+        required: false
+        type: string
+        default: 'dev,poc'
+    secrets:
+      DOCKERHUB_TOKEN:
+        description: 'Docker Hub token for pushing images'
+        required: true
+      GH_CI_PAT:
+        description: 'GitHub PAT for cloning private repositories and updating helm repo'
+        required: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ inputs.dockerhub_username }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile_path }}
+          push: false
+          load: true
+          tags: |
+            ${{ inputs.dockerhub_username }}/${{ inputs.service_name }}:${{ github.run_number }}
+            ${{ inputs.dockerhub_username }}/${{ inputs.service_name }}:latest
+
+      - name: Run Trivy vulnerability scanner
+        if: ${{ inputs.enable_trivy_scan }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ inputs.dockerhub_username }}/${{ inputs.service_name }}:${{ github.run_number }}'
+          format: 'table'
+          exit-code: ${{ inputs.trivy_exit_code }}
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: ${{ inputs.trivy_severity }}
+          timeout: ${{ inputs.trivy_timeout }}
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ inputs.dockerhub_username }}/${{ inputs.service_name }}:${{ github.run_number }}
+          docker push ${{ inputs.dockerhub_username }}/${{ inputs.service_name }}:latest
+          docker rmi ${{ inputs.dockerhub_username }}/${{ inputs.service_name }}:${{ github.run_number }} -f
+
+      - name: Configure Git for Helm Update
+        if: ${{ inputs.update_helm_values }}
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Clone Helm Repository
+        if: ${{ inputs.update_helm_values }}
+        run: |
+          REPO_URL="${{ inputs.helm_repo_url }}"
+          REPO_PATH="${REPO_URL#https://}"
+          git clone https://x-access-token:${{ secrets.GH_CI_PAT }}@${REPO_PATH} helm-repo
+
+      - name: Update Helm Values Files
+        if: ${{ inputs.update_helm_values }}
+        run: |
+          cd helm-repo
+          BRANCH_NAME="${{ github.ref_name }}"
+          echo "Triggered from branch: $BRANCH_NAME"
+
+          if [[ "$BRANCH_NAME" == "dev" ]]; then
+            ENVS=("dev" "poc")
+            echo "Updating environments: dev, poc"
+          elif [[ "$BRANCH_NAME" == "preprod" ]]; then
+            ENVS=("preprod")
+            echo "Updating environment: preprod"
+          else
+            IFS=',' read -ra ENVS <<< "${{ inputs.helm_environments }}"
+            echo "Using default environments from input: ${{ inputs.helm_environments }}"
+          fi
+
+          FILES_UPDATED=false
+
+          for env in "${ENVS[@]}"; do
+            env=$(echo "$env" | xargs)
+            VALUES_FILE="environments/${env}/${{ inputs.service_name }}.yaml"
+
+            if [ -f "$VALUES_FILE" ]; then
+              echo "Updating $VALUES_FILE with tag: ${{ github.run_number }}"
+              yq eval '.image.tag = "${{ github.run_number }}"' -i "$VALUES_FILE"
+              FILES_UPDATED=true
+              echo "✓ Updated $VALUES_FILE"
+            else
+              echo "⚠ Warning: $VALUES_FILE not found, skipping..."
+            fi
+          done
+
+          if [ "$FILES_UPDATED" = true ]; then
+            echo "FILES_UPDATED=true" >> $GITHUB_ENV
+          else
+            echo "FILES_UPDATED=false" >> $GITHUB_ENV
+            echo "❌ No files were updated!"
+          fi
+
+      - name: Commit and Push Helm Changes
+        if: ${{ inputs.update_helm_values && env.FILES_UPDATED == 'true' }}
+        run: |
+          cd helm-repo
+          if [[ -n $(git status -s) ]]; then
+            git add environments/
+            git commit -m "Update ${{ inputs.service_name }} image tag to ${{ github.run_number }}"
+            git push origin main
+            echo "✓ Changes committed and pushed to helm repository"
+          else
+            echo "ℹ No changes detected, skipping commit"
+          fi
+
+      - name: Cleanup Helm Repository
+        if: ${{ always() && inputs.update_helm_values }}
+        run: |
+          rm -rf helm-repo

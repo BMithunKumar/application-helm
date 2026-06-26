@@ -1,0 +1,18 @@
+name: Build & Deploy
+
+on:
+  workflow_dispatch:
+    branches: [dev]
+
+jobs:
+  call-deploy:
+    uses: ./.github/workflows/build-and-deploy-template.yml
+    with:
+      service_name: 'argocd-rollback'
+      dockerhub_username: 'mithunkumarb2004'
+      runner: 'self-hosted'
+      update_helm_values: true
+      helm_repo_url: 'https://github.com/BMithunKumar/helm-files.git'
+    secrets:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GH_CI_PAT: ${{ secrets.GH_CI_PAT }}
