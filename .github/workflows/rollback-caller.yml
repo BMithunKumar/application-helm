@@ -28,5 +28,5 @@ jobs:
       runner: 'self-hosted'
       helm_repo_url: 'https://github.com/BMithunKumar/helm-files.git'
     secrets:
-      ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+      ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
       GH_CI_PAT: ${{ secrets.GH_CI_PAT }}

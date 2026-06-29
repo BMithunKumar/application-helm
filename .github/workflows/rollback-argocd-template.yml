@@ -58,16 +58,11 @@ jobs:
             sudo chmod +x /usr/local/bin/yq
           fi
 
-      - name: Start ArgoCD Port-Forward
-        run: |
-          kubectl port-forward svc/argocd-server -n argocd 8080:443 &
-          echo $! > /tmp/argocd-pf.pid
-          sleep 5
-
       - name: Login to ArgoCD
         run: |
           argocd login ${{ inputs.argocd_server }} \
-            --auth-token ${{ secrets.ARGOCD_TOKEN }} \
+            --username admin \
+            --password ${{ secrets.ARGOCD_PASSWORD }} \
             --insecure
 
       - name: Get Target Tag from ArgoCD History
