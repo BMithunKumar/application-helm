@@ -76,38 +76,68 @@ jobs:
             exit 1
           fi
 
-          argocd app history "$APP_NAME" --output json > history.json
+          # get history table and skip first 2 header lines
+          argocd app history "$APP_NAME" | tail -n +3 > history.txt
 
-          HISTORY_LENGTH=$(jq length history.json)
+          echo "History:"
+          cat history.txt
+
+          HISTORY_LENGTH=$(wc -l < history.txt)
+          echo "Total entries: $HISTORY_LENGTH"
+
           if [ "$HISTORY_LENGTH" -le "$STEPS_BACK" ]; then
             echo "ERROR: Not enough history. Found $HISTORY_LENGTH entries, need at least $((STEPS_BACK + 1))"
             exit 1
           fi
 
-          CURRENT_TAG=$(jq -r \
-            '.[0].source.helm.parameters[]? | select(.name=="image.tag") | .value' \
-            history.json)
+          # current = last line
+          CURRENT_REVISION=$(tail -1 history.txt | awk '{print $1}')
 
-          TARGET_TAG=$(jq -r \
-            ".[$STEPS_BACK].source.helm.parameters[]? | select(.name==\"image.tag\") | .value" \
-            history.json)
+          # target = steps_back lines from the end
+          TARGET_LINE=$(tail -n $((STEPS_BACK + 1)) history.txt | head -1)
+          TARGET_REVISION=$(echo "$TARGET_LINE" | awk '{print $1}')
 
-          TARGET_REVISION=$(jq -r ".[$STEPS_BACK].revision" history.json)
+          echo "Current revision : $CURRENT_REVISION"
+          echo "Target revision  : $TARGET_REVISION"
+
+          # now get the git commit hash for target revision
+          # format is: master (f0b4e5d) — extract the hash
+          TARGET_GIT_HASH=$(echo "$TARGET_LINE" | grep -oP '\(\K[^\)]+')
+          echo "Target git hash  : $TARGET_GIT_HASH"
+
+          # clone helm repo at that git commit and read the tag
+          REPO_URL="${{ inputs.helm_repo_url }}"
+          REPO_PATH="${REPO_URL#https://}"
+          git clone https://x-access-token:${{ secrets.GH_CI_PAT }}@${REPO_PATH} helm-repo-history
+
+          cd helm-repo-history
+          git checkout "$TARGET_GIT_HASH"
+
+          VALUES_FILE="environments/${{ inputs.environment }}/${{ inputs.service_name }}.yaml"
+          TARGET_TAG=$(yq eval '.image.tag' "$VALUES_FILE")
+
+          # also get current tag from latest commit
+          git checkout master
+          CURRENT_TAG=$(yq eval '.image.tag' "$VALUES_FILE")
+
+          cd ..
+          rm -rf helm-repo-history
 
           if [ -z "$TARGET_TAG" ] || [ "$TARGET_TAG" == "null" ]; then
-            echo "ERROR: Could not find image.tag in ArgoCD history at index $STEPS_BACK"
+            echo "ERROR: Could not find image.tag at revision $TARGET_GIT_HASH"
             exit 1
           fi
 
           echo "Current tag : $CURRENT_TAG"
           echo "Target tag  : $TARGET_TAG"
-          echo "Revision    : $TARGET_REVISION"
+          echo "Revision ID : $TARGET_REVISION"
 
           echo "app_name=$APP_NAME"               >> "$GITHUB_OUTPUT"
           echo "current_tag=$CURRENT_TAG"         >> "$GITHUB_OUTPUT"
           echo "target_tag=$TARGET_TAG"           >> "$GITHUB_OUTPUT"
           echo "target_revision=$TARGET_REVISION" >> "$GITHUB_OUTPUT"
 
+          
       - name: Disable Auto-Sync
         run: |
           argocd app set ${{ steps.argocd_info.outputs.app_name }} \
