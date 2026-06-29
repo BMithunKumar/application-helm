@@ -32,7 +32,7 @@ on:
         type: string
         default: 'ubuntu-latest'
     secrets:
-      ARGOCD_TOKEN:
+      ARGOCD_PASSWORD:
         required: true
       GH_CI_PAT:
         required: true
