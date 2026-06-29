@@ -20,7 +20,7 @@ on:
         description: 'ArgoCD server hostname'
         required: false
         type: string
-        default: 'argocd.example.com'
+        default: 'localhost:8080'
       helm_repo_url:
         description: 'Helm repository URL'
         required: false
@@ -31,11 +31,6 @@ on:
         required: false
         type: string
         default: 'ubuntu-latest'
-      dockerhub_username:
-        description: 'Docker Hub username'
-        required: false
-        type: string
-        default: 'mithunkumarb2004'
     secrets:
       ARGOCD_TOKEN:
         required: true
@@ -62,12 +57,17 @@ jobs:
               https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
             sudo chmod +x /usr/local/bin/yq
           fi
-        
+
+      - name: Start ArgoCD Port-Forward
+        run: |
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 &
+          echo $! > /tmp/argocd-pf.pid
+          sleep 5
+
       - name: Login to ArgoCD
         run: |
           argocd login ${{ inputs.argocd_server }} \
             --auth-token ${{ secrets.ARGOCD_TOKEN }} \
-            --grpc-web \
             --insecure
 
       - name: Get Target Tag from ArgoCD History
@@ -173,8 +173,20 @@ jobs:
             --auto-prune \
             --self-heal
 
+      - name: Rollback Summary
+        if: always()
+        run: |
+          echo "App    : ${{ steps.argocd_info.outputs.app_name }}"
+          echo "From   : ${{ steps.argocd_info.outputs.current_tag }}"
+          echo "To     : ${{ steps.argocd_info.outputs.target_tag }}"
+          argocd app get ${{ steps.argocd_info.outputs.app_name }}
+
       - name: Cleanup
         if: always()
         run: |
           rm -rf helm-repo
           rm -f history.json
+          if [ -f /tmp/argocd-pf.pid ]; then
+            kill $(cat /tmp/argocd-pf.pid) || true
+            rm -f /tmp/argocd-pf.pid
+          fi
