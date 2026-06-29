@@ -51,14 +51,18 @@ jobs:
     steps:
       - name: Install ArgoCD CLI and yq
         run: |
-          sudo curl -sSL -o /usr/local/bin/argocd \
-            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          sudo chmod +x /usr/local/bin/argocd
+          if ! command -v argocd &> /dev/null; then
+            sudo curl -sSL -o /usr/local/bin/argocd \
+              https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+            sudo chmod +x /usr/local/bin/argocd
+          fi
 
-          sudo curl -sSL -o /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
-
+          if ! command -v yq &> /dev/null; then
+            sudo curl -sSL -o /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+        
       - name: Login to ArgoCD
         run: |
           argocd login ${{ inputs.argocd_server }} \
